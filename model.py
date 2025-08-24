@@ -375,7 +375,7 @@ class HRM_model(nn.Module):
         self.config = config
         self.inner = HRM_Inner(config)
         assert False, "Not Implemented yet"
-    
+
     
     def initial_carry(self, batch: Dict[str, torch.Tensor]) -> Carry:
         batch_size = batch["inputs"].shape[0]
@@ -386,13 +386,54 @@ class HRM_model(nn.Module):
         inner_carry = self.get_init_inner_carry(batch_size, config.max_seq_len)
         return Carry(inner_carry, halted, current_data)
         
-    def forward(self, carry: Carry) -> Tuple[Carry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]: 
+        
+    def forward(self, batch: Dict[str, torch.Tensor], carry: Carry) -> Tuple[Carry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]: 
         # we need to reset the carry for all halted sequences,
         # and then forward all the elements of the batch.
         
         # first, we initialize the carry by resetting the halted sequences.
-        new_inner_carry = carry.inner.reset_carry(carry)
-        assert False, "Not Implemented"
+        new_inner_carry = carry.inner.reset_carry(carry.halted, carry.inner_carry)
+        new_steps = torch.where(carry.halted, 0, carry.steps)
+        new_current_data = {
+            k: torch.where(
+                carry.halted.view((-1) + (1, )*(batch[k].ndim - 1)), 
+                batch[k], 
+                v
+            ) for k, v in carry.current_data.items()
+        }
+        
+        # do one forward pass now with the resetted carry.
+        new_inner_carry, output_token_embeds, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
+        
+        outputs = {
+            "output_token_embeds": output_token_embeds,
+            "q_halt_logits": q_halt_logits,
+            "q_continue_logits": q_continue_logits,
+            "g_continue": None # these will be computed in a moment.
+        }
+        
+        # everything got a forward pass on it after resetting the halted segments.
+        new_steps = new_steps + 1
+        
+        # check if any of the sequences are halted.
+        halted = new_steps >= self.config.halt_max_steps
+        is_last_step = halted
+        halted = halted | (q_halt_logits > q_continue_logits)
+        min_halt_steps = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
+                          ) * torch.randint_like(new_steps, low=self.config.min_halt_steps, high=self.config.halt_max_steps + 1)
+        halted = halted & min_halt_steps
+        
+        # might need to optimise  this routine to be carried over from the next forward pass.
+        # but then this would change the order of the forward/backward pass interleaving.
+        # this could have huge consequences or maybe minor consequences
+        #     on the quality of the training. it could be positive, too.
+        # would be good to read the literature on this like that one paper on DEEP SOMETHING
+        # that was referenced inside HRM and then formulate a hypothesis on the best way to go about this.
+        
+        next_q_halt_logits, next_q_continue_logits = self.inner(new_inner_carry, new_current_data)[-1]
+        outputs["g_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
+        
+        return Carry(new_inner_carry, halted, new_steps, new_current_data), outputs
         
                 
 

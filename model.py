@@ -430,7 +430,9 @@ class HRM_model(nn.Module):
         # would be good to read the literature on this like that one paper on DEEP SOMETHING
         # that was referenced inside HRM and then formulate a hypothesis on the best way to go about this.
         
-        next_q_halt_logits, next_q_continue_logits = self.inner(new_inner_carry, new_current_data)[-1]
+        with torch.no_grad():
+            next_q_halt_logits, next_q_continue_logits = self.inner(new_inner_carry, new_current_data)[-1]
+        
         outputs["g_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
         
         return Carry(new_inner_carry, halted, new_steps, new_current_data), outputs

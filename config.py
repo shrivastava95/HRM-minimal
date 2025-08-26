@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from pathlib import Path
 
 config = SimpleNamespace(
     causal             = False   ,
@@ -22,17 +23,22 @@ config = SimpleNamespace(
     epochs             = 20000   ,
     eval_interval      = 2000    ,
     batch_size         = 32      ,
+    lr_warmup_steps    = 2000    ,
+    lr_min_ratio       = 1.0     ,
     lr                 = 2e-5    ,
-    lr_warmup_steps    = 500     ,
     wd                 = 1e0     ,
     beta1              = 0.9     ,
     beta2              = 0.95    ,
-    puzzle_emb_lr      = 2e-4    ,
+    puzzle_emb_lr      = 2e-3    ,
     puzzle_emb_wd      = 1e0     ,
     rope_theta         = 10000.0 ,
     layer_norm_eps     = 1e-5    ,
     dropout            = 0.1     ,
-    checkpoint_every   = True    
+    checkpoint_every   = True    ,
+    ignore_index       = -100    ,
+    
+    train_data_path    = Path('./data') / 'sudoku-extreme-full' / 'train.csv',
+    test_data_path     = Path('./data') / 'sudoku-extreme-full' / 'test.csv'  ,
 )
 
 assert config.norm_order in ['post', 'pre']

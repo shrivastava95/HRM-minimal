@@ -1,8 +1,12 @@
 import math
-
+import hashlib
 import torch
 from torch import nn
 
+
+def compute_file_hash(filepath: str) -> str:
+    with open(filepath, 'rb') as f:
+        return hashlib.md5(f.read()).hexdigest()
 
 def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0, lower: float = -2.0, upper: float = 2.0):
     # NOTE: PyTorch nn.init.trunc_normal_ is not mathematically correct, the std dev is not actually the std dev of initialized tensor

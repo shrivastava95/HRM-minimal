@@ -17,6 +17,7 @@ from adam_atan2 import AdamATan2
 
 from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
+from common import compute_file_hash
 from config import config
 from dataloader import download_sudoku_dataset, create_dataloader, SudokuDataset
 from model import HRM_model
@@ -93,8 +94,19 @@ def main(config):
     # load the datasets
     if not os.path.exists(config.train_data_path) or not os.path.exists(config.test_data_path):
         download_sudoku_dataset()
-    train_dataset = SudokuDataset(config.train_data_path)
-    test_dataset  = SudokuDataset(config.test_data_path)
+    
+    
+    # try loading the datasets from cache, else save them
+    train_hash = compute_file_hash(config.train_data_path)
+    test_hash  = compute_file_hash(config.test_data_path)
+    if not os.path.exists(f'/tmp/train_{train_hash}.pt'):
+        train_dataset = SudokuDataset(config.train_data_path)
+        torch.save(train_dataset, f'/tmp/train_{train_hash}.pt')
+    if not os.path.exists(f'/tmp/test_{test_hash}.pt'):
+        test_dataset = SudokuDataset(config.test_data_path)
+        torch.save(test_dataset, f'/tmp/test_{test_hash}.pt')
+    train_dataset = torch.load(f'/tmp/train_{train_hash}.pt', weights_only=False)
+    test_dataset  = torch.load(f'/tmp/test_{test_hash}.pt'  , weights_only=False)
     
     # create the dataloaders
     train_dataloader = create_dataloader(train_dataset, config.batch_size)
@@ -102,7 +114,7 @@ def main(config):
     
     
     # create the model
-    model = HRM_model(config)
+    model = HRM_model(config).to(config.device)
     
     # create the optimizers
     optimizers = [
@@ -139,27 +151,29 @@ def main(config):
     # no loss funciton, it will be included directly inside of the training loop
     
     # training loop
+    train_loader_iter = iter(train_dataloader)
+    bar = tqdm(total=config.epochs, desc=f"Step {0}/{config.epochs}   Loss: {0:.4f}")
     for epoch in range(config.epochs):
+        # train batch
+        batch = next(train_loader_iter)
+        batch = {k: v.to(config.device) for k, v in batch.items()}
+        # forward pass
         # initialize the carry
         if epoch == 0:
             carry = model.initial_carry(batch)
 
-        # train batch
-        bar = tqdm(total=len(train_dataloader), desc=f"Epoch {epoch+1}/{config.epochs}   Loss: {0:.4f}")
-        for batch in train_dataloader:
-            # forward pass
-            loss, carry = train_batch(model, batch, carry)
-            if (config.epoch + 1) % config.eval_interval == 0:
-                eval_batch(model, batch, carry)
-            # backward pass
-            loss.backward()
-            # update the model and schedulers
-            for optimizer, scheduler in zip(optimizers, schedulers):
-                optimizer.step()
-                optimizer.zero_grad()
-                scheduler.step()
-            bar.update(1)
-            bar.set_description(f"Epoch {epoch+1}/{config.epochs}   Loss: {loss.item():.4f}")
+        loss, carry = train_batch(model, batch, carry)
+        if (epoch + 1) % config.eval_interval == 0:
+            eval_batch(model, batch, carry)
+        # backward pass
+        loss.backward()
+        # update the model and schedulers
+        for optimizer, scheduler in zip(optimizers, schedulers):
+            optimizer.step()
+            optimizer.zero_grad()
+            scheduler.step()
+        bar.update(1)
+        bar.set_description(f"Epoch {epoch+1}/{config.epochs}   Loss: {loss.item():.4f}")
     
 if __name__ == '__main__':
     main(config)

@@ -52,7 +52,6 @@ def train_batch(model, batch, carry):
     # logit stablemax/softmax cross entropy
     token_logits = outputs["output_token_embeds"]
     token_labels = carry.current_data["labels"]
-    token_loss = stablemax_cross_entropy(token_logits, token_labels, config.ignore_index).sum(dim=-1).mean(dim=-1) # sum across the sample dim and mean across batch
     
     # Q-halt BCEwithLogitsLoss
     # but first we will have to compute the correctness of the q_halt_logits
@@ -77,8 +76,14 @@ def train_batch(model, batch, carry):
     correct_count = torch.sum(torch.where(token_labels == token_predictions, 1, 0), dim=-1) # sum across the sample dimension. shape [B]
     g_halt = torch.where(prediction_count == correct_count, 1.0, 0.0) # shape [B]
     
+    # token loss
+    token_loss = stablemax_cross_entropy(token_logits, token_labels, config.ignore_index).sum(dim=-1) / prediction_count # sum across the sample dim and mean across batch
+    token_loss = token_loss.mean()
+    
+    # q_halt loss
     q_halt_loss = nn.functional.binary_cross_entropy_with_logits(outputs["q_halt_logits"], g_halt)
-    # Q-continue BCEwithLogitsLoss
+    
+    # q_continue loss
     q_continue_loss = nn.functional.binary_cross_entropy_with_logits(outputs["q_continue_logits"], outputs["g_continue"])
     
     loss = token_loss + 0.5 * (q_halt_loss + q_continue_loss)

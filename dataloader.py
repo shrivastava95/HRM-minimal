@@ -84,7 +84,7 @@ class SudokuDataset(Dataset):
 
 
 
-def create_dataloader(dataset, batch_size=64, shuffle=True):
+def create_dataloader(dataset, batch_size, shuffle=True):
     """
     Creates a DataLoader for the given dataset.
     

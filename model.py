@@ -239,18 +239,20 @@ class Carry(nn.Module):
 class HRM_Inner(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config
         self.num_puzzle_embs = config.num_puzzle_embs
+        self.embed_puzzle_embs = nn.Embedding(config.num_puzzle_embs, config.d_model)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
         self.embed_tokens.weight = nn.Parameter(trunc_normal_init_(torch.empty(config.vocab_size, config.d_model), std=math.sqrt(config.d_model)))
-        self.L_module = HRMRecurrentModule([HRMBlock(config, MultiHeadSelfAttentionWithRoPE(config)) for _i in range(config.T_L)])
-        self.H_module = HRMRecurrentModule([HRMBlock(config, MultiHeadSelfAttentionWithRoPE(config)) for _i in range(config.H_L)])
+        self.L_module = HRMRecurrentModule(config, [HRMBlock(config, MultiHeadSelfAttentionWithRoPE(config)) for _i in range(config.L_depth)])
+        self.H_module = HRMRecurrentModule(config, [HRMBlock(config, MultiHeadSelfAttentionWithRoPE(config)) for _i in range(config.H_depth)])
         self.L_cycles = config.L_cycles
         self.H_cycles = config.H_cycles
         self.M_min, self.M_max = config.M_min, config.M_max
-        self.register_buffer("Z_L_init", trunc_normal_init_(torch.empty(self.config.d_model, dtype=torch.float32), std=1))
-        self.register_buffer("Z_H_init", trunc_normal_init_(torch.empty(self.config.d_model, dtype=torch.float32), std=1))
-        self.lm_head = nn.Linear(self.config.d_model, self.config.vocab_size - 1, bias=False)
-        self.q_head  = nn.Linear(self.config.d_model, 2, bias=True)
+        self.register_buffer("Z_L_init", trunc_normal_init_(torch.empty(config.d_model, dtype=torch.float32), std=1))
+        self.register_buffer("Z_H_init", trunc_normal_init_(torch.empty(config.d_model, dtype=torch.float32), std=1))
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size - 1, bias=False)
+        self.q_head  = nn.Linear(config.d_model, 2, bias=True)
         for linearlayer in [self.lm_head, self.q_head]:
             linearlayer.weight = nn.Parameter(
                 trunc_normal_init_(
@@ -372,15 +374,17 @@ class HRM_Inner(nn.Module):
         
 class HRM_model(nn.Module):
     def __init__(self, config):
+        super().__init__()
         self.config = config
         self.inner = HRM_Inner(config)
-        assert False, "Not Implemented yet"
+        # assert False, "Not Implemented yet"
 
     
     def initial_carry(self, batch: Dict[str, torch.Tensor]) -> Carry:
         batch_size = batch["inputs"].shape[0]
         # ... for the whole batch now
         halted = torch.ones(batch_size, dtype=torch.bool).to(batch["inputs"].dtype) 
+        steps = torch.zeros(batch_size, dtype=torch.int32)
         # all halted, will be reset on the first forward pass.
         current_data = {k: v for k, v in batch.items()}
         inner_carry = self.get_init_inner_carry(batch_size, config.max_seq_len)
@@ -402,14 +406,15 @@ class HRM_model(nn.Module):
             ) for k, v in carry.current_data.items()
         }
         
-        # do one forward pass now with the resetted carry.
+        # forward pass 
+        # now with the resetted carry.
         new_inner_carry, output_token_embeds, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
         
         outputs = {
             "output_token_embeds": output_token_embeds,
             "q_halt_logits": q_halt_logits,
             "q_continue_logits": q_continue_logits,
-            "g_continue": None # these will be computed in a moment.
+            "g_continue": None # these will be computed in a moment. and only if the model is training.
         }
         
         # everything got a forward pass on it after resetting the halted segments.
@@ -430,10 +435,11 @@ class HRM_model(nn.Module):
         # would be good to read the literature on this like that one paper on DEEP SOMETHING
         # that was referenced inside HRM and then formulate a hypothesis on the best way to go about this.
         
-        with torch.no_grad():
-            next_q_halt_logits, next_q_continue_logits = self.inner(new_inner_carry, new_current_data)[-1]
-        
-        outputs["g_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
+        if self.training:
+            with torch.no_grad():
+                next_q_halt_logits, next_q_continue_logits = self.inner(new_inner_carry, new_current_data)[-1]
+            
+            outputs["g_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
         
         return Carry(new_inner_carry, halted, new_steps, new_current_data), outputs
         

@@ -223,13 +223,13 @@ class HRMRecurrentModule(nn.Module):
 
 
 @dataclass
-class InnerCarry(nn.Module):
+class InnerCarry:
     Z_L: torch.Tensor
     Z_H: torch.Tensor
 
 
 @dataclass
-class Carry(nn.Module):
+class Carry:
     inner_carry: InnerCarry
     halted: torch.Tensor
     steps: torch.Tensor
@@ -241,7 +241,7 @@ class HRM_Inner(nn.Module):
         super().__init__()
         self.config = config
         self.num_puzzle_embs = config.num_puzzle_embs
-        self.embed_puzzle_embs = nn.Embedding(config.num_puzzle_embs, config.d_model)
+        self.puzzle_embs = nn.Embedding(config.num_puzzle_embs, config.d_model)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
         self.embed_tokens.weight = nn.Parameter(trunc_normal_init_(torch.empty(config.vocab_size, config.d_model), std=math.sqrt(config.d_model)))
         self.L_module = HRMRecurrentModule(config, [HRMBlock(config, MultiHeadSelfAttentionWithRoPE(config)) for _i in range(config.L_depth)])
@@ -251,7 +251,7 @@ class HRM_Inner(nn.Module):
         self.M_min, self.M_max = config.M_min, config.M_max
         self.register_buffer("Z_L_init", trunc_normal_init_(torch.empty(config.d_model, dtype=torch.float32), std=1))
         self.register_buffer("Z_H_init", trunc_normal_init_(torch.empty(config.d_model, dtype=torch.float32), std=1))
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size - 1, bias=False)
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.q_head  = nn.Linear(config.d_model, 2, bias=True)
         for linearlayer in [self.lm_head, self.q_head]:
             linearlayer.weight = nn.Parameter(
@@ -273,8 +273,8 @@ class HRM_Inner(nn.Module):
 
     def get_init_inner_carry(self, batch_size, max_seq_len) -> InnerCarry:
         return InnerCarry(
-            self.Z_L_init.unsqueeze(0).unsqueeze(0).repeat(batch_size, max_seq_len, 1), 
-            self.Z_H_init.unsqueeze(0).unsqueeze(0).repeat(batch_size, max_seq_len, 1),
+            self.Z_L_init.unsqueeze(0).unsqueeze(0).repeat(batch_size, max_seq_len, 1).to(self.config.device), 
+            self.Z_H_init.unsqueeze(0).unsqueeze(0).repeat(batch_size, max_seq_len, 1).to(self.config.device),
         )
     
     
@@ -300,9 +300,10 @@ class HRM_Inner(nn.Module):
         ######## note that the line below will never work because it doesnt respect the shape of batch[k]
         #     current_data = {k: torch.where(reset_flag.reshape(-1, 1, 1), batch[k], inner_carry.current_data[k]) for k in batch.keys()}
         # )
+        reset_flag = reset_flag.reshape(-1, 1, 1).to(torch.bool)
         new_inner_carry = InnerCarry(
-            Z_L = torch.where(reset_flag.reshape(-1, 1, 1), init_inner_carry.Z_L, inner_carry.Z_L),
-            Z_H = torch.where(reset_flag.reshape(-1, 1, 1), init_inner_carry.Z_H, inner_carry.Z_H)
+            Z_L = torch.where(reset_flag, init_inner_carry.Z_L, inner_carry.Z_L),
+            Z_H = torch.where(reset_flag, init_inner_carry.Z_H, inner_carry.Z_H)
         )
         
         return new_inner_carry
@@ -310,16 +311,15 @@ class HRM_Inner(nn.Module):
 
     def get_input_embeds(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         # get the puzzle embeds from the puzzle_identifiers.
-        puzzle_token_ids = batch["puzzle_identifiers"]
+        puzzle_token_ids = batch["puzzle_identifiers"].unsqueeze(-1).to(self.config.device)
         # get the puzzle token embeds from the embed_tokens.
-        puzzle_input_ids = batch["inputs"]
+        puzzle_input_ids = batch["inputs"].to(self.config.device)
         # concatenate the puzzle token ids and the puzzle input ids.
-        puzzle_token_ids = torch.cat([
-            puzzle_token_ids.unsqueeze(-1), 
-            puzzle_input_ids    
-        ])
         # get the emebds for the concatenated token seqence.
-        input_embeds = self.embed_tokens(puzzle_token_ids)
+        input_puzzle_embeds = self.puzzle_embs(puzzle_token_ids)
+        input_token_embeds = self.embed_tokens(puzzle_input_ids)
+        
+        input_embeds = torch.cat([input_puzzle_embeds, input_token_embeds], dim=puzzle_token_ids.ndim - 1)
         return input_embeds
     
     
@@ -361,7 +361,6 @@ class HRM_Inner(nn.Module):
         
         # finally, run through the entire stack for inference.                
         output_token_embeds = self.lm_head(Z_H)[:, self.config.num_puzzle_embs:]
-        self.q_continue
         # # q_head (for now its unused, disabled)
         # q_head. we are switching back to using it. hopefully it works. if god is willing.
         
@@ -383,12 +382,12 @@ class HRM_model(nn.Module):
     def initial_carry(self, batch: Dict[str, torch.Tensor]) -> Carry:
         batch_size = batch["inputs"].shape[0]
         # ... for the whole batch now
-        halted = torch.ones(batch_size, dtype=torch.bool).to(batch["inputs"].dtype) 
-        steps = torch.zeros(batch_size, dtype=torch.int32)
+        halted = torch.ones(batch_size, dtype=torch.bool).to(self.config.device)
+        steps = torch.zeros(batch_size, dtype=torch.int32).to(self.config.device)
         # all halted, will be reset on the first forward pass.
         current_data = {k: v for k, v in batch.items()}
-        inner_carry = self.get_init_inner_carry(batch_size, config.max_seq_len)
-        return Carry(inner_carry, halted, current_data)
+        inner_carry = self.inner.get_init_inner_carry(batch_size, config.max_seq_len)
+        return Carry(inner_carry, halted, steps, current_data)
         
         
     def forward(self, batch: Dict[str, torch.Tensor], carry: Carry) -> Tuple[Carry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]: 
@@ -396,11 +395,11 @@ class HRM_model(nn.Module):
         # and then forward all the elements of the batch.
         
         # first, we initialize the carry by resetting the halted sequences.
-        new_inner_carry = carry.inner.reset_carry(carry.halted, carry.inner_carry)
+        new_inner_carry = self.inner.reset_inner_carry(carry.halted, carry.inner_carry)
         new_steps = torch.where(carry.halted, 0, carry.steps)
         new_current_data = {
             k: torch.where(
-                carry.halted.view((-1) + (1, )*(batch[k].ndim - 1)), 
+                carry.halted.view((-1, ) + (1, )*(batch[k].ndim - 1)), 
                 batch[k], 
                 v
             ) for k, v in carry.current_data.items()
@@ -421,12 +420,12 @@ class HRM_model(nn.Module):
         new_steps = new_steps + 1
         
         # check if any of the sequences are halted.
-        halted = new_steps >= self.config.halt_max_steps
+        halted = new_steps >= self.config.M_max
         is_last_step = halted
         halted = halted | (q_halt_logits > q_continue_logits)
         min_halt_steps = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
-                          ) * torch.randint_like(new_steps, low=self.config.min_halt_steps, high=self.config.halt_max_steps + 1)
-        halted = halted & min_halt_steps
+                          ) * torch.randint_like(new_steps, low=self.config.M_min, high=self.config.M_max + 1)
+        halted = halted & (new_steps >= min_halt_steps)
         
         # might need to optimise  this routine to be carried over from the next forward pass.
         # but then this would change the order of the forward/backward pass interleaving.

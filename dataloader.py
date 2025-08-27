@@ -33,11 +33,13 @@ class SudokuDataset(Dataset):
     """
     A PyTorch Dataset for loading Sudoku puzzles from a CSV file.
     """
-    def __init__(self, csv_path):
+    def __init__(self, config, csv_path, enforce_global_batch_size=True):
         """
         Args:
             csv_path (str): The path to the csv file containing the sudoku puzzles.
         """
+        self.config = config
+        self.enforce_global_batch_size = enforce_global_batch_size
         self.quizzes = []
         self.solutions = []
         
@@ -81,10 +83,31 @@ class SudokuDataset(Dataset):
         solution = torch.from_numpy(self.solutions[idx]).to(torch.int32)
         puzzle_identifier = torch.tensor(0, dtype= torch.int32)
         return {"inputs":quiz,"labels": solution,"puzzle_identifiers": puzzle_identifier}
+    
+    def __collate_fn__(self, batch):
+        # the deafult collate function, if i had not defined this here, would
+        if self.enforce_global_batch_size:
+            local_batch_size = len(batch)
+            if local_batch_size < self.config.batch_size:
+                # give the user a warning
+                print(f"Warning: batch size {local_batch_size} is less than global batch size {self.config.batch_size}. This is likely due to the last batch of the dataset. Please set drop_last=False in `create_dataloader`, or modify the padding behaviour of the last batch.")
+                print(f"Right now, the batch will be padded with config.ignore_index={self.config.ignore_index}")
+                # repeat the batch as many times as needed to reach the global batch size.
+                # this makes a secondary fallback mechanism for the desired behaviour of the last batch.
+                batch = [{k: v.clone() for k, v in batch[_i % local_batch_size].items()} for _i in range(self.config.batch_size)]
+                for _i in range(local_batch_size, self.config.batch_size):
+                    batch[_i]["labels"][:] = self.config.ignore_index
+        # stack the batch
+        
+        batch = {
+            'inputs': torch.stack([x['inputs'] for x in batch]),
+            'labels': torch.stack([x['labels'] for x in batch]),
+            'puzzle_identifiers': torch.stack([x['puzzle_identifiers'] for x in batch]),
+        }
+        return batch
 
 
-
-def create_dataloader(dataset, batch_size, shuffle=True):
+def create_dataloader(dataset, batch_size, shuffle=True, drop_last=False):
     """
     Creates a DataLoader for the given dataset.
     
@@ -96,7 +119,7 @@ def create_dataloader(dataset, batch_size, shuffle=True):
     Returns:
         DataLoader: A PyTorch DataLoader for the dataset.
     """
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, collate_fn=dataset.__collate_fn__)
 
 
 

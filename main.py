@@ -150,18 +150,17 @@ def main(config):
     train_hash = compute_file_hash(config.train_data_path)
     test_hash  = compute_file_hash(config.test_data_path)
     if not os.path.exists(f'/tmp/train_{train_hash}.pt'):
-        train_dataset = SudokuDataset(config.train_data_path)
+        train_dataset = SudokuDataset(config, config.train_data_path, enforce_global_batch_size=True)
         torch.save(train_dataset, f'/tmp/train_{train_hash}.pt')
     if not os.path.exists(f'/tmp/test_{test_hash}.pt'):
-        test_dataset = SudokuDataset(config.test_data_path)
+        test_dataset = SudokuDataset(config, config.test_data_path)
         torch.save(test_dataset, f'/tmp/test_{test_hash}.pt')
     train_dataset = torch.load(f'/tmp/train_{train_hash}.pt', weights_only=False)
     test_dataset  = torch.load(f'/tmp/test_{test_hash}.pt'  , weights_only=False)
     
     # create the dataloaders
-    train_dataloader = create_dataloader(train_dataset, config.batch_size)
-    test_dataloader  = create_dataloader( test_dataset, config.batch_size)
-    
+    train_dataloader = create_dataloader(train_dataset, config.batch_size, shuffle=True , drop_last=True )
+    test_dataloader  = create_dataloader( test_dataset, config.batch_size, shuffle=False, drop_last=False)
     
     # create the model
     model = HRM_model(config).to(config.device)
@@ -215,7 +214,13 @@ def main(config):
     bar = tqdm(total=config.epochs, desc=f"Step {0}/{config.epochs}   Loss: {0:.4f}")
     for epoch in range(config.epochs):
         # train batch
-        batch = next(train_loader_iter)
+        
+        # if iterator is exhausted, reset it and get the next batch.
+        try:
+            batch = next(train_loader_iter)
+        except StopIteration:
+            train_loader_iter = iter(train_dataloader)
+            batch = next(train_loader_iter)
         batch = {k: v.to(config.device) for k, v in batch.items()}
         # forward pass
         # initialize the carry

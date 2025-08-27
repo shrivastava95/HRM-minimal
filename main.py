@@ -12,6 +12,7 @@ from tqdm import tqdm
 import shutil
 import subprocess
 import datetime
+import wandb
 
 import torch
 import torch.nn as nn
@@ -91,7 +92,22 @@ def train_batch(model, batch, carry):
     
     loss = token_loss + 0.5 * (q_halt_loss + q_continue_loss)
 
-    return loss, carry
+    # metrics
+    with torch.no_grad():
+        valid_mask = token_labels != config.ignore_index
+        correct_tokens = (token_predictions == token_labels) & valid_mask
+        total_valid_tokens = valid_mask.sum()
+        per_token_accuracy = (correct_tokens.sum().to(torch.float32) / torch.clamp_min(total_valid_tokens.to(torch.float32), 1.0))
+        overall_accuracy = g_halt.mean().to(torch.float32)
+
+    return {
+        "loss": loss,
+        "token_loss": token_loss,
+        "q_halt_loss": q_halt_loss,
+        "q_continue_loss": q_continue_loss,
+        "per_token_accuracy": per_token_accuracy,
+        "overall_accuracy": overall_accuracy,
+    }, carry
     
 
 def eval_batch(model, batch, carry):
@@ -184,6 +200,16 @@ def main(config):
     
     # no loss funciton, it will be included directly inside of the training loop
     
+    # init wandb
+    try:
+        result = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent))
+        commit_hash = result.stdout.strip() if result.returncode == 0 else 'no_git_hash'
+    except Exception:
+        commit_hash = 'no_git_hash'
+    short_hash = commit_hash[:7]
+    run_timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    wandb.init(project='hrm-minimal', name=f'{run_timestamp}__{short_hash}', config=dict(vars(config)))
+
     # training loop
     train_loader_iter = iter(train_dataloader)
     bar = tqdm(total=config.epochs, desc=f"Step {0}/{config.epochs}   Loss: {0:.4f}")
@@ -196,18 +222,41 @@ def main(config):
         if epoch == 0:
             carry = model.initial_carry(batch)
 
-        loss, carry = train_batch(model, batch, carry)
+        losses, carry = train_batch(model, batch, carry)
         if (epoch + 1) % config.eval_interval == 0:
             eval_batch(model, batch, carry)
         # backward pass
-        loss.backward()
+        losses["loss"].backward()
         # update the model and schedulers
         for optimizer, scheduler in zip(optimizers, schedulers):
             optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
         bar.update(1)
-        bar.set_description(f"Epoch {epoch+1}/{config.epochs}   Loss: {loss.item():.4f}")
+        bar.set_description(
+            f"Epoch {epoch+1}/{config.epochs} Loss: {losses['loss'].item():.4f} TokAcc: {losses['per_token_accuracy'].item():.4f} AllAcc: {losses['overall_accuracy'].item():.4f}"
+        )
+
+        # wandb logging
+        try:
+            lr_main = optimizers[0].param_groups[0]['lr']
+            lr_puzzle = optimizers[1].param_groups[0]['lr']
+        except Exception:
+            lr_main = None
+            lr_puzzle = None
+        log_payload = {
+            'loss/total': losses['loss'].item(),
+            'loss/token': losses['token_loss'].item(),
+            'loss/q_halt': losses['q_halt_loss'].item(),
+            'loss/q_continue': losses['q_continue_loss'].item(),
+            'metrics/per_token_accuracy': losses['per_token_accuracy'].item(),
+            'metrics/overall_accuracy': losses['overall_accuracy'].item(),
+        }
+        if lr_main is not None:
+            log_payload['lr/main'] = lr_main
+        if lr_puzzle is not None:
+            log_payload['lr/puzzle_emb'] = lr_puzzle
+        wandb.log(log_payload, step=epoch + 1)
     
 if __name__ == '__main__':
     main(config)

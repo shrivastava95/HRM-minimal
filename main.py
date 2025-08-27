@@ -9,6 +9,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from tqdm import tqdm
+import shutil
+import subprocess
+import datetime
 
 import torch
 import torch.nn as nn
@@ -92,7 +95,33 @@ def train_batch(model, batch, carry):
     
 
 def eval_batch(model, batch, carry):
-    pass
+    base_dir = Path(__file__).resolve().parent
+    checkpoints_dir = base_dir / 'checkpoints'
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, cwd=str(base_dir))
+        commit_hash = result.stdout.strip() if result.returncode == 0 else 'no_git_hash'
+    except Exception:
+        commit_hash = 'no_git_hash'
+
+    short_hash = commit_hash[:7]
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    run_dir = checkpoints_dir / f'{timestamp}__{short_hash}'
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # save model checkpoint
+    torch.save(model.state_dict(), str(run_dir / 'model.pt'))
+
+    # save commit hash
+    with open(run_dir / 'commit_hash.txt', 'w') as f:
+        f.write(commit_hash)
+
+    # copy source files
+    for fname in ['config.py', 'model.py', 'main.py', 'dataloader.py']:
+        src = base_dir / fname
+        if src.exists():
+            shutil.copy2(src, run_dir / fname)
 
 
 def main(config):
